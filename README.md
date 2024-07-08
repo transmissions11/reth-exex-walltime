@@ -1,2 +1,2 @@
-# reth-walltime-exex
+# reth-exex-walltime
 wall time exex for reth

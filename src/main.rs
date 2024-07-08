@@ -120,7 +120,7 @@ mod tests {
         // Sleep for a second.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        // Assert that the wall time is now 1000 ms before the unix epoch, ~10ms tolerance.
+        // Assert that the wall time is now 1000 ms before the unix epoch — 5ms tolerance.
         let time_difference =
             if exex.as_mut().last_block_timedata.wall_time_ms > (unix_epoch_ms() - 1000) {
                 &exex.last_block_timedata.wall_time_ms - (unix_epoch_ms() - 1000)

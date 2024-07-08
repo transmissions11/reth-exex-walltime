@@ -85,7 +85,7 @@ impl<Node: FullNodeComponents + Unpin> Future for WallTimeExEx<Node> {
             }
 
             if let Poll::Ready(Some(tx)) = this.rpc_requests_stream.poll_next_unpin(cx) {
-                let _ = tx.send(this.last_block_timedata.wall_time_ms);
+                let _ = tx.send(this.last_block_timedata.wall_time_ms.clone());
                 continue;
             }
 
@@ -95,19 +95,19 @@ impl<Node: FullNodeComponents + Unpin> Future for WallTimeExEx<Node> {
 }
 
 #[rpc(server, namespace = "ext")]
-trait WalltimeRpcExtApi {
-    /// Return the walltime of the latest block.
-    #[method(name = "getWalltime")]
-    async fn get_walltime(&self) -> RpcResult<u64>;
+trait WallTimeRpcExtApi {
+    /// Return the wall time of the latest block.
+    #[method(name = "getWallTime")]
+    async fn get_wall_time(&self) -> RpcResult<u64>;
 }
 
-pub struct WalltimeRpcExt {
+pub struct WallTimeRpcExt {
     to_exex: mpsc::UnboundedSender<oneshot::Sender<u64>>,
 }
 
 #[async_trait]
-impl WalltimeRpcExtApiServer for WalltimeRpcExt {
-    async fn get_walltime(&self) -> RpcResult<u64> {
+impl WallTimeRpcExtApiServer for WallTimeRpcExt {
+    async fn get_wall_time(&self) -> RpcResult<u64> {
         let (tx, rx) = oneshot::channel();
         let _ = self.to_exex.send(tx).map_err(|_| rpc_internal_error())?;
         rx.await.map_err(|_| rpc_internal_error())
@@ -126,7 +126,7 @@ fn main() -> eyre::Result<()> {
             .node(EthereumNode::default())
             .extend_rpc_modules(move |ctx| {
                 ctx.modules
-                    .merge_configured(WalltimeRpcExt { to_exex: rpc_tx }.into_rpc())?;
+                    .merge_configured(WallTimeRpcExt { to_exex: rpc_tx }.into_rpc())?;
                 Ok(())
             })
             .install_exex("walltime", |ctx| async move {

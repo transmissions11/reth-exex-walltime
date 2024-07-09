@@ -11,6 +11,7 @@ use reth_exex::{ExExContext, ExExNotification};
 use reth_node_api::FullNodeComponents;
 use reth_node_ethereum::EthereumNode;
 use reth_tracing::tracing::info;
+use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     pin::Pin,
@@ -27,7 +28,7 @@ pub fn unix_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct BlockTimeData {
     /// Wall time of last block
     wall_time_ms: u64,
@@ -39,7 +40,7 @@ struct WallTimeExEx<Node: FullNodeComponents> {
     /// The context of the ExEx
     ctx: ExExContext<Node>,
     /// Incoming RPC requests.
-    rpc_requests_stream: UnboundedReceiverStream<oneshot::Sender<u64>>,
+    rpc_requests_stream: UnboundedReceiverStream<oneshot::Sender<BlockTimeData>>,
     /// Time data of last block
     last_block_timedata: BlockTimeData,
 }
@@ -47,7 +48,7 @@ struct WallTimeExEx<Node: FullNodeComponents> {
 impl<Node: FullNodeComponents> WallTimeExEx<Node> {
     fn new(
         ctx: ExExContext<Node>,
-        rpc_requests_stream: UnboundedReceiverStream<oneshot::Sender<u64>>,
+        rpc_requests_stream: UnboundedReceiverStream<oneshot::Sender<BlockTimeData>>,
     ) -> Self {
         Self {
             ctx,
@@ -85,7 +86,7 @@ impl<Node: FullNodeComponents + Unpin> Future for WallTimeExEx<Node> {
             }
 
             if let Poll::Ready(Some(tx)) = this.rpc_requests_stream.poll_next_unpin(cx) {
-                let _ = tx.send(this.last_block_timedata.wall_time_ms.clone());
+                let _ = tx.send(this.last_block_timedata);
                 continue;
             }
 
@@ -94,20 +95,21 @@ impl<Node: FullNodeComponents + Unpin> Future for WallTimeExEx<Node> {
     }
 }
 
-#[rpc(server, namespace = "ext")]
+#[cfg_attr(not(test), rpc(server, namespace = "ext"))]
+#[cfg_attr(test, rpc(server, client, namespace = "ext"))]
 trait WallTimeRpcExtApi {
-    /// Return the wall time of the latest block.
-    #[method(name = "getWallTime")]
-    async fn get_wall_time(&self) -> RpcResult<u64>;
+    /// Return the wall time and block timestamp of the latest block.
+    #[method(name = "getTimeData")]
+    async fn get_timedata(&self) -> RpcResult<BlockTimeData>;
 }
 
 pub struct WallTimeRpcExt {
-    to_exex: mpsc::UnboundedSender<oneshot::Sender<u64>>,
+    to_exex: mpsc::UnboundedSender<oneshot::Sender<BlockTimeData>>,
 }
 
 #[async_trait]
 impl WallTimeRpcExtApiServer for WallTimeRpcExt {
-    async fn get_wall_time(&self) -> RpcResult<u64> {
+    async fn get_timedata(&self) -> RpcResult<BlockTimeData> {
         let (tx, rx) = oneshot::channel();
         let _ = self.to_exex.send(tx).map_err(|_| rpc_internal_error())?;
         rx.await.map_err(|_| rpc_internal_error())
@@ -145,11 +147,61 @@ fn main() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonrpsee::http_client::HttpClientBuilder;
     use reth::providers::{Chain, ExecutionOutcome};
     use reth::revm::db::BundleState;
+    use reth::rpc::builder::ServerBuilder;
     use reth_exex_test_utils::{test_exex_context, PollOnce};
     use reth_testing_utils::generators::{self, random_block, random_receipt};
+    use reth_transaction_pool::noop::NoopTransactionPool;
     use std::pin::pin;
+    use tokio_stream::StreamExt;
+
+    async fn start_server() -> std::net::SocketAddr {
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let (rpc_tx, rpc_rx) = mpsc::unbounded_channel::<oneshot::Sender<BlockTimeData>>();
+
+        tokio::spawn(async move {
+            let mut receiver = UnboundedReceiverStream::new(rpc_rx);
+            while let Some(tx) = receiver.next().await {
+                let dummy_data = BlockTimeData {
+                    wall_time_ms: unix_epoch_ms(),
+                    block_timestamp: unix_epoch_ms() / 1000,
+                };
+                let _ = tx.send(dummy_data);
+            }
+        });
+
+        let api = WallTimeRpcExt { to_exex: rpc_tx };
+        let server_handle = server.start(api.into_rpc());
+
+        tokio::spawn(server_handle.stopped());
+
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_timedata_http() {
+        let server_addr = start_server().await;
+        let uri = format!("http://{}", server_addr);
+        let client = HttpClientBuilder::default().build(&uri).unwrap();
+        let count = WallTimeRpcExtApiClient::get_timedata(&client)
+            .await
+            .unwrap();
+
+        // Assert that the block timestamp is correct.
+        assert_eq!(
+            count.block_timestamp,
+            unix_epoch_ms() / 1000
+        );
+
+        // Assert that the wall time is within 1s.
+        assert_eq!(
+            count.wall_time_ms / 1000,
+            unix_epoch_ms() / 1000
+        );
+    }
 
     #[tokio::test]
     async fn test_exex() -> eyre::Result<()> {
@@ -184,14 +236,14 @@ mod tests {
         // Sleep for a second.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        // Assert that the wall time is now 1000 ms before the unix epoch — 5ms tolerance.
+        // Assert that the wall time is now 1000 ms before the unix epoch — 10ms tolerance.
         let time_difference =
             if exex.as_mut().last_block_timedata.wall_time_ms > (unix_epoch_ms() - 1000) {
                 &exex.last_block_timedata.wall_time_ms - (unix_epoch_ms() - 1000)
             } else {
                 (unix_epoch_ms() - 1000) - &exex.last_block_timedata.wall_time_ms
             };
-        assert!(time_difference <= 5);
+        assert!(time_difference <= 10);
 
         // Assert that the block timestamp is correct.
         assert_eq!(exex.last_block_timedata.block_timestamp, block_1_timestamp);

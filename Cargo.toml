@@ -13,9 +13,11 @@ reth-node-api = { git = "https://github.com/paradigmxyz/reth" }
 reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth" }
 
 eyre = "0.6"
 
+serde = { version = "1.0", features = ["derive"] }
 tonic = "0.11"
 prost = "0.12"
 tokio = { version = "1.0", features = ["full"] }
